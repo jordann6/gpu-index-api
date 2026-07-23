@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.coverage*
+.pytest_cache/
+.ruff_cache/
+.env
+*.egg-info/
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+.DS_Store
+
+# local tfvars may contain a personal email
+terraform.tfvars

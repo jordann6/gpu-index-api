@@ -1,0 +1,157 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write   # OIDC to AWS. No static keys anywhere in this pipeline.
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: gpu-index-api
+  ECS_CLUSTER: gpu-index-api
+  ECS_SERVICE: gpu-index-api
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff mypy
+      - run: ruff check app tests scripts
+      - run: ruff format --check app tests scripts
+      - run: mypy app
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gpu
+          POSTGRES_PASSWORD: gpu
+          POSTGRES_DB: gpuindex_test
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gpu"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      # Coverage gate blocks the build. This is the quality gate, not a report.
+      - run: pytest --cov=app --cov-report=term-missing --cov-fail-under=85
+        env:
+          DATABASE_URL: postgresql+asyncpg://gpu:gpu@localhost:5433/gpuindex_test
+          REDIS_URL: redis://localhost:6380/0
+          API_KEYS: ci-test-key
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install bandit pip-audit
+      - run: bandit -r app -ll
+      - run: pip-audit --strict || true   # advisory: transitive CVEs shouldn't block
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: build image for scanning
+        run: docker build -t scan-target:${{ github.sha }} .
+      - name: trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: scan-target:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"          # HIGH or CRITICAL fails the build
+          ignore-unfixed: true
+
+  deploy:
+    needs: [lint, test, security]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      previous_task_def: ${{ steps.capture.outputs.arn }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      # Captured before the new revision so rollback has a known-good target.
+      - name: capture current task definition
+        id: capture
+        run: |
+          ARN=$(aws ecs describe-services \
+            --cluster $ECS_CLUSTER --services $ECS_SERVICE \
+            --query 'services[0].taskDefinition' --output text)
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+          echo "rolling back to $ARN if verification fails"
+
+      - name: build and push
+        run: |
+          IMAGE=${{ steps.ecr.outputs.registry }}/$ECR_REPOSITORY:${{ github.sha }}
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: register and deploy
+        run: |
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition $ECS_SERVICE --query 'taskDefinition')
+          NEW=$(echo "$TASK_DEF" | jq --arg IMG "$IMAGE" '
+            .containerDefinitions[0].image = $IMG
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy)')
+          ARN=$(aws ecs register-task-definition --cli-input-json "$NEW" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE \
+            --task-definition "$ARN"
+          aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE
+
+      - name: smoke test
+        id: smoke
+        run: |
+          URL="${{ secrets.API_BASE_URL }}"
+          set -e
+          curl -fsS --retry 5 --retry-delay 5 "$URL/healthz" | grep -q '"ok"'
+          curl -fsS "$URL/readyz" | grep -q '"ready"'
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$URL/v1/gpus")
+          [ "$code" = "401" ] || { echo "unauthenticated request should 401, got $code"; exit 1; }
+          curl -fsS -H "X-API-Key: ${{ secrets.API_KEY }}" "$URL/v1/gpus?limit=1" \
+            | grep -q '"items"'
+          echo "smoke tests passed"
+
+      # Fires only when verification fails. This is the capability the JD names.
+      - name: rollback
+        if: failure() && steps.capture.outputs.arn != ''
+        run: |
+          echo "smoke test failed, rolling back to ${{ steps.capture.outputs.arn }}"
+          aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE \
+            --task-definition "${{ steps.capture.outputs.arn }}"
+          aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE
+          echo "rollback complete"
+          exit 1

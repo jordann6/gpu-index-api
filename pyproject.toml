@@ -1,0 +1,71 @@
+[project]
+name = "gpu-index-api"
+version = "1.0.0"
+description = "Pricing intelligence and benchmark index API for GPU compute."
+requires-python = ">=3.12"
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "redis>=5.2.0",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "bandit>=1.8.0",
+    "pip-audit>=2.7.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+# B008: Depends()/Security() in argument defaults is the FastAPI idiom, not a bug.
+ignore = ["S101", "E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B"]
+"scripts/*" = ["S311"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Session-scoped loop so the async engine fixture and the tests share one loop.
+# Without this, asyncpg connections get reused across loops and raise
+# "another operation is in progress".
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.coverage.run]
+# SQLAlchemy's asyncio layer runs code inside greenlets. Without this, every
+# line after an `await session.execute(...)` is reported as unhit.
+concurrency = ["greenlet", "thread"]
+
+[tool.coverage.report]
+fail_under = 85
+omit = ["tests/*", "scripts/*"]
