@@ -51,7 +51,7 @@ looks like.
 | Concurrent, limit 8 | 570 ms | 6.8x |
 | Concurrent, limit 32 | 192 ms | **20.1x** |
 
-**Tests:** 41 passing, 95% coverage against an 85% gate.
+**Tests:** 47 passing, 95% coverage against an 85% gate.
 
 ## Stack
 
@@ -63,7 +63,7 @@ Docker, Terraform, ECS Fargate, GitHub Actions.
 ```bash
 docker compose up -d postgres redis
 pip install -e ".[dev]"
-python scripts/seed.py --rows 2000000     # a few minutes
+python scripts/seed.py --rows 2000000     # runs migrations, then seeds
 python scripts/tune.py                     # regenerates docs/query-tuning.md
 uvicorn app.main:app --reload
 ```
@@ -187,7 +187,35 @@ Cloud measurements on 250,000 seeded rows (`db.t4g.micro`):
 The RTT floor matters when reading the endpoint timings: client-observed latency
 from outside the region is dominated by round trip, not query time.
 
-**Known gap:** the tuning indexes live in `scripts/tune.py`, not in the SQLAlchemy
-models, so a fresh deploy starts untuned until that script runs. They belong in
-an Alembic migration. This was caught by deploying: the cloud hot path sat at
-~170 ms until the indexes were applied out of band.
+This gap was found by deploying: the cloud hot path sat at ~170 ms because the
+tuning indexes existed only in `scripts/tune.py`, so they were present in every
+measurement and in no deployment. Fixed, see below.
+
+## Schema and migrations
+
+The DDL for the performance indexes lives in exactly one place,
+[`app/db/indexes.py`](app/db/indexes.py), and is imported by both the Alembic
+migration that creates them and the tuning script that drops and rebuilds them
+to measure their effect. Neither can drift from the other.
+
+```
+0001_initial_schema     tables, FKs, natural-key constraint
+0002_tuning_indexes     the five performance indexes + ANALYZE
+```
+
+The indexes are a separate revision on purpose, so the performance work is a
+reviewable change rather than something buried in the initial schema.
+
+```bash
+alembic upgrade head       # build schema, including indexes
+alembic downgrade 0001     # drop the indexes, keep the data
+```
+
+`scripts/seed.py` builds the schema by running the migrations rather than
+`Base.metadata.create_all`, so a seeded database is constructed exactly the way
+a deployed one is and every seed run exercises the migration path.
+
+Six tests in `tests/integration/test_migrations.py` guard the arrangement: they
+assert the migration imports the shared DDL rather than restating it, that drop
+statements cover every index, and that the DDL applies cleanly against real
+Postgres and is visible to the planner afterward.

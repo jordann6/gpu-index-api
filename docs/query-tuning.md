@@ -3,7 +3,7 @@
 Measurements taken against the seeded dataset. Reproduce with `python scripts/tune.py`.
 
 - **Rows in `price_points`:** 2,000,000
-- **Table size including indexes:** 824 MB
+- **Table size including indexes:** 785 MB
 - **Query under test:** latest price per provider and region for `L4`,
   with a 30 day rolling median, filtered to available capacity, sorted by price
 - **Method:** median of 5 runs, `EXPLAIN (ANALYZE, BUFFERS)`
@@ -19,9 +19,9 @@ bitmap heap scan, and picks the slower plan even once the index exists.
 
 | | Median latency |
 |---|---|
-| Before indexing | **165.6 ms** |
-| After indexing | **27.4 ms** |
-| Improvement | **83.4%** |
+| Before indexing | **183.2 ms** |
+| After indexing | **24.3 ms** |
+| Improvement | **86.7%** |
 
 ## Indexes added
 
@@ -74,8 +74,8 @@ At depth 50,000 rows:
 
 | Strategy | Before indexes | After indexes |
 |---|---|---|
-| `OFFSET 50000` | 74.3 ms | 12.9 ms |
-| Keyset `(observed_at, id) < (...)` | 45.7 ms | 0.6 ms |
+| `OFFSET 50000` | 78.4 ms | 3.7 ms |
+| Keyset `(observed_at, id) < (...)` | 47.0 ms | 1.0 ms |
 
 `OFFSET` has to walk and discard every preceding row, so its cost grows linearly
 with depth no matter what indexes exist. Keyset pagination seeks straight to the
@@ -84,81 +84,83 @@ cursor position. This is why the API exposes a cursor rather than a page number.
 ## Plan before
 
 ```
-Limit  (cost=56662.04..56662.54 rows=200 width=210) (actual time=484.688..484.719 rows=200 loops=1)
-  Buffers: shared hit=4476 read=40277 written=12
+Limit  (cost=58380.38..58380.88 rows=200 width=210) (actual time=710.988..711.001 rows=200 loops=1)
+  Buffers: shared hit=621 read=46911 written=3761
   InitPlan 1 (returns $0)
-    ->  Aggregate  (cost=26419.25..26419.26 rows=1 width=8) (actual time=350.919..350.920 rows=1 loops=1)
-          Buffers: shared hit=174 read=22991 written=8
-          ->  Bitmap Heap Scan on price_points  (cost=976.66..26025.10 rows=78829 width=6) (actual time=7.877..324.096 rows=77451 loops=1)
-                Recheck Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:00:06.4474-05'::timestamp with time zone))
+    ->  Aggregate  (cost=26984.25..26984.26 rows=1 width=8) (actual time=295.691..295.691 rows=1 loops=1)
+          Buffers: shared hit=167 read=23602 written=1963
+          ->  Bitmap Heap Scan on price_points  (cost=1605.41..26606.04 rows=75642 width=6) (actual time=20.184..280.442 rows=77451 loops=1)
+                Recheck Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:34:20.710811-05'::timestamp with time zone))
                 Heap Blocks: exact=23007
-                Buffers: shared hit=166 read=22991 written=8
-                ->  Bitmap Index Scan on ix_price_lookup  (cost=0.00..956.96 rows=78829 width=0) (actual time=5.882..5.883 rows=77451 loops=1)
-                      Index Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:00:06.4474-05'::timestamp with time zone))
-                      Buffers: shared read=150
-  ->  Sort  (cost=30242.78..30243.28 rows=200 width=210) (actual time=484.687..484.698 rows=200 loops=1)
+                Buffers: shared hit=159 read=23602 written=1963
+                ->  Bitmap Index Scan on uq_price_observation  (cost=0.00..1586.50 rows=75642 width=0) (actual time=18.172..18.172 rows=77451 loops=1)
+                      Index Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:34:20.710811-05'::timestamp with time zone))
+                      Buffers: shared hit=127 read=627 written=81
+  ->  Sort  (cost=31396.11..31396.61 rows=200 width=210) (actual time=710.988..710.992 rows=200 loops=1)
         Sort Key: pp.usd_per_hour, pp.region
         Sort Method: quicksort  Memory: 53kB
-        Buffers: shared hit=4476 read=40277 written=12
-        ->  Merge Join  (cost=29797.66..30235.13 rows=200 width=210) (actual time=474.484..484.415 rows=200 loops=1)
+        Buffers: shared hit=621 read=46911 written=3761
+        ->  Merge Join  (cost=30965.82..31388.46 rows=200 width=210) (actual time=706.859..710.905 rows=200 loops=1)
               Merge Cond: (pp.provider_id = pr.id)
-              Buffers: shared hit=4476 read=40277 written=12
-              ->  Unique  (cost=29797.51..30211.36 rows=200 width=52) (actual time=123.533..133.376 rows=200 loops=1)
-                    Buffers: shared hit=4300 read=17286 written=4
-                    ->  Sort  (cost=29797.51..29935.46 rows=55180 width=52) (actual time=123.532..127.819 rows=53959 loops=1)
+              Buffers: shared hit=621 read=46911 written=3761
+              ->  Unique  (cost=30965.68..31364.69 rows=200 width=52) (actual time=411.150..415.161 rows=200 loops=1)
+                    Buffers: shared hit=452 read=23309 written=1798
+                    ->  Sort  (cost=30965.68..31098.68 rows=53202 width=52) (actual time=411.150..412.947 rows=53959 loops=1)
                           Sort Key: pp.provider_id, pp.region, pp.observed_at DESC
                           Sort Method: quicksort  Memory: 7269kB
-                          Buffers: shared hit=4300 read=17286 written=4
-                          ->  Bitmap Heap Scan on price_points pp  (cost=619.92..25451.57 rows=55180 width=52) (actual time=5.738..81.306 rows=53959 loops=1)
-                                Recheck Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:00:06.4474-05'::timestamp with time zone) AND ((availability)::text = 'available'::text))
-                                Heap Blocks: exact=21536
-                                Buffers: shared hit=4300 read=17286 written=4
-                                ->  Bitmap Index Scan on ix_price_available  (cost=0.00..606.13 rows=55180 width=0) (actual time=3.781..3.781 rows=53959 loops=1)
-                                      Index Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:00:06.4474-05'::timestamp with time zone))
-                                      Buffers: shared read=50
-              ->  Index Scan using providers_pkey on providers pr  (cost=0.15..18.00 rows=310 width=150) (actual time=0.020..0.026 rows=10 loops=1)
+                          Buffers: shared hit=452 read=23309 written=1798
+                          ->  Bitmap Heap Scan on price_points pp  (cost=1599.80..26789.53 rows=53202 width=52) (actual time=86.250..370.774 rows=53959 loops=1)
+                                Recheck Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:34:20.710811-05'::timestamp with time zone))
+                                Filter: ((availability)::text = 'available'::text)
+                                Rows Removed by Filter: 23492
+                                Heap Blocks: exact=23007
+                                Buffers: shared hit=452 read=23309 written=1798
+                                ->  Bitmap Index Scan on uq_price_observation  (cost=0.00..1586.50 rows=75642 width=0) (actual time=84.228..84.228 rows=77451 loops=1)
+                                      Index Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:34:20.710811-05'::timestamp with time zone))
+                                      Buffers: shared hit=160 read=594
+              ->  Index Scan using providers_pkey on providers pr  (cost=0.15..18.00 rows=310 width=150) (actual time=0.010..0.013 rows=10 loops=1)
                     Buffers: shared hit=2
 Planning:
-  Buffers: shared hit=90
-Planning Time: 0.367 ms
-Execution Time: 484.803 ms
+  Buffers: shared hit=82 read=2
+Planning Time: 0.647 ms
+Execution Time: 711.049 ms
 ```
 
 ## Plan after
 
 ```
-Limit  (cost=5194.98..5195.48 rows=200 width=210) (actual time=39.707..39.719 rows=200 loops=1)
+Limit  (cost=5184.41..5184.91 rows=200 width=210) (actual time=34.898..34.910 rows=200 loops=1)
   Buffers: shared hit=2 read=1198
   InitPlan 1 (returns $0)
-    ->  Aggregate  (cost=2306.88..2306.89 rows=1 width=8) (actual time=20.169..20.170 rows=1 loops=1)
+    ->  Aggregate  (cost=2302.23..2302.24 rows=1 width=8) (actual time=18.579..18.580 rows=1 loops=1)
           Buffers: shared hit=1 read=384
-          ->  Index Only Scan using ix_price_median on price_points  (cost=0.43..1928.31 rows=75714 width=6) (actual time=0.231..7.182 rows=77451 loops=1)
-                Index Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:00:06.4474-05'::timestamp with time zone))
+          ->  Index Only Scan using ix_price_median on price_points  (cost=0.43..1924.37 rows=75572 width=6) (actual time=0.147..6.359 rows=77451 loops=1)
+                Index Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:34:20.710811-05'::timestamp with time zone))
                 Heap Fetches: 0
                 Buffers: shared hit=1 read=384
-  ->  Sort  (cost=2888.08..2888.58 rows=200 width=210) (actual time=39.707..39.711 rows=200 loops=1)
+  ->  Sort  (cost=2882.16..2882.66 rows=200 width=210) (actual time=34.897..34.901 rows=200 loops=1)
         Sort Key: pp.usd_per_hour, pp.region
         Sort Method: quicksort  Memory: 53kB
         Buffers: shared hit=2 read=1198
-        ->  Merge Join  (cost=0.70..2880.44 rows=200 width=210) (actual time=20.731..39.614 rows=200 loops=1)
+        ->  Merge Join  (cost=0.70..2874.52 rows=200 width=210) (actual time=19.101..34.814 rows=200 loops=1)
               Merge Cond: (pp.provider_id = pr.id)
               Buffers: shared hit=2 read=1198
-              ->  Result  (cost=0.55..2856.67 rows=200 width=52) (actual time=0.480..19.309 rows=200 loops=1)
+              ->  Result  (cost=0.55..2850.75 rows=200 width=52) (actual time=0.338..16.003 rows=200 loops=1)
                     Buffers: shared hit=1 read=812
-                    ->  Unique  (cost=0.55..2856.67 rows=200 width=52) (actual time=0.479..19.287 rows=200 loops=1)
+                    ->  Unique  (cost=0.55..2850.75 rows=200 width=52) (actual time=0.337..15.981 rows=200 loops=1)
                           Buffers: shared hit=1 read=812
-                          ->  Index Only Scan using ix_price_latest on price_points pp  (cost=0.55..2591.58 rows=53018 width=52) (actual time=0.479..17.081 rows=53959 loops=1)
-                                Index Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:00:06.4474-05'::timestamp with time zone))
+                          ->  Index Only Scan using ix_price_latest on price_points pp  (cost=0.55..2585.60 rows=53029 width=52) (actual time=0.337..13.856 rows=53959 loops=1)
+                                Index Cond: ((gpu_model_id = 7) AND (observed_at >= '2026-06-23 12:34:20.710811-05'::timestamp with time zone))
                                 Filter: ((availability)::text = 'available'::text)
                                 Rows Removed by Filter: 23492
                                 Heap Fetches: 0
                                 Buffers: shared hit=1 read=812
-              ->  Index Scan using providers_pkey on providers pr  (cost=0.15..18.00 rows=310 width=150) (actual time=0.077..0.084 rows=10 loops=1)
+              ->  Index Scan using providers_pkey on providers pr  (cost=0.15..18.00 rows=310 width=150) (actual time=0.180..0.184 rows=10 loops=1)
                     Buffers: shared read=2
 Planning:
-  Buffers: shared hit=43
-Planning Time: 0.347 ms
-Execution Time: 39.776 ms
+  Buffers: shared hit=35
+Planning Time: 0.211 ms
+Execution Time: 34.940 ms
 ```
 
 ## Notes

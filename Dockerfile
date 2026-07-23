@@ -9,7 +9,7 @@ COPY pyproject.toml ./
 RUN pip install --no-cache-dir --prefix=/install \
     "fastapi>=0.115.0" "uvicorn[standard]>=0.32.0" "pydantic>=2.9.0" \
     "pydantic-settings>=2.6.0" "sqlalchemy[asyncio]>=2.0.36" \
-    "asyncpg>=0.30.0" "redis>=5.2.0" "httpx>=0.27.0"
+    "alembic>=1.14.0" "asyncpg>=0.30.0" "redis>=5.2.0" "httpx>=0.27.0"
 
 FROM python:3.12-slim AS runtime
 
@@ -26,6 +26,10 @@ ENV PYTHONPATH=/app
 COPY --from=builder /install /usr/local
 COPY app ./app
 COPY scripts ./scripts
+# Migrations ship in the image so seeding and schema upgrades can run as
+# one-off ECS tasks inside the VPC, where RDS is not publicly reachable.
+COPY migrations ./migrations
+COPY alembic.ini ./alembic.ini
 
 USER appuser
 EXPOSE 8000

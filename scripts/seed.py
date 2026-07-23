@@ -10,7 +10,10 @@ import argparse
 import asyncio
 import random
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 
 from app.db.models import Base
@@ -128,11 +131,22 @@ BASE_PRICE = {
 
 
 async def create_schema() -> None:
+    """Drop everything, then build the schema by running the migrations.
+
+    Deliberately not Base.metadata.create_all: the tuning indexes live in
+    migration 0002, not in the model definitions, so create_all would produce
+    an untuned database that silently differs from a real deployment. Running
+    the migrations here means the seeded database and production are built the
+    same way, and every seed run exercises the migration path.
+    """
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
-    print("schema created")
+        await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+
+    config = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+    await asyncio.to_thread(command.upgrade, config, "head")
+    print("schema created via alembic upgrade head")
 
 
 async def seed_dimensions() -> tuple[dict, dict]:

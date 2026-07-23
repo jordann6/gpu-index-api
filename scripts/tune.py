@@ -14,62 +14,9 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 
+from app.db.indexes import TUNING_INDEXES, drop_statements
 from app.db.session import dispose_engine, get_engine, get_sessionmaker
 from app.services.pricing import LATEST_PRICES_SQL
-
-INDEXES = [
-    (
-        "ix_price_latest",
-        "CREATE INDEX ix_price_latest ON price_points "
-        "(gpu_model_id, provider_id, region, observed_at DESC) "
-        "INCLUDE (usd_per_hour, instance_type, availability)",
-        "Covering index for the hot path, doing two things at once. The column "
-        "order matches `DISTINCT ON (provider_id, region) ORDER BY ..., "
-        "observed_at DESC` exactly, so Postgres consumes index order and skips "
-        "the sort entirely. INCLUDE carries every selected column, so the scan "
-        "is index-only and never touches the heap.\n\n"
-        "Deliberately **not** a partial index on `availability = 'available'`. "
-        "That version measured worse: because the API passes availability as a "
-        "bind parameter rather than a literal, the planner cannot prove the "
-        "partial predicate is satisfied and falls back to a bitmap heap scan "
-        "plus an external merge sort. Carrying `availability` in INCLUDE lets "
-        "the filter be applied index-only instead.",
-    ),
-    (
-        "ix_price_median",
-        "CREATE INDEX ix_price_median ON price_points "
-        "(gpu_model_id, observed_at) INCLUDE (usd_per_hour)",
-        "Covers the rolling-median CTE, which reads every observation in the "
-        "window regardless of availability. Without INCLUDE this was the single "
-        "most expensive branch of the plan, fetching ~23k heap blocks.",
-    ),
-    (
-        "ix_price_keyset",
-        "CREATE INDEX ix_price_keyset ON price_points (gpu_model_id, observed_at DESC, id DESC)",
-        "Supports keyset pagination so deep pages seek instead of counting off.",
-    ),
-    (
-        "ix_price_cheapest",
-        "CREATE INDEX ix_price_cheapest ON price_points "
-        "(gpu_model_id, usd_per_hour) INCLUDE (provider_id, region, observed_at) "
-        "WHERE availability = 'available'",
-        "Serves the `/v1/index/{workload}` ranking, whose `best_price` CTE takes "
-        "`DISTINCT ON (gpu_model_id) ... ORDER BY gpu_model_id, usd_per_hour` "
-        "across every model at once. Without this the endpoint scanned the whole "
-        "table on a cache miss and produced multi-second outliers under load. "
-        "A partial index is correct here because this query filters on the "
-        "literal `'available'` rather than a bind parameter.",
-    ),
-    (
-        "ix_benchmark_best",
-        "CREATE INDEX ix_benchmark_best ON benchmark_runs "
-        "(workload, gpu_model_id, throughput DESC) INCLUDE (precision)",
-        "Matches the `best_bench` CTE ordering so the top throughput per model "
-        "is read straight off the index instead of sorted per request.",
-    ),
-]
-
-DROP_ALL = "; ".join(f"DROP INDEX IF EXISTS {name}" for name, _, _ in INDEXES)
 
 
 async def vacuum_analyze() -> None:
@@ -173,8 +120,10 @@ async def main() -> None:
         # rather than mixing in the planner-cost change.
         await apply_planner_settings(session)
 
-        # Guarantee a clean baseline even on a rerun.
-        for stmt in DROP_ALL.split("; "):
+        # Guarantee a clean baseline even on a rerun. These indexes are created
+        # by migration 0002; dropping them here measures the same DDL the
+        # migration ships, then rebuilds it.
+        for stmt in drop_statements():
             await session.execute(text(stmt))
         await session.commit()
         await session.execute(text("ANALYZE price_points"))
@@ -187,7 +136,7 @@ async def main() -> None:
         print(f"  baseline median {before_ms:.1f} ms")
 
         print("creating indexes...")
-        for name, ddl, _ in INDEXES:
+        for name, _table, ddl, _why in TUNING_INDEXES:
             start = time.perf_counter()
             await session.execute(text(ddl))
             await session.commit()
@@ -265,7 +214,7 @@ def render(
 ) -> str:
     index_docs = "\n".join(
         f"**`{name}`** {sizes.get(name, 'n/a')}\n\n```sql\n{ddl}\n```\n\n{why}\n"
-        for name, ddl, why in INDEXES
+        for name, _table, ddl, why in TUNING_INDEXES
     )
 
     pagination = ""
