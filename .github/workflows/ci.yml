@@ -56,6 +56,9 @@ jobs:
       # Coverage gate blocks the build. This is the quality gate, not a report.
       - run: pytest --cov=app --cov-report=term-missing --cov-fail-under=85
         env:
+          # TEST_DATABASE_URL is what conftest reads for the integration engine.
+          # It must match the host-side port published by the service above.
+          TEST_DATABASE_URL: postgresql+asyncpg://gpu:gpu@localhost:5433/gpuindex_test
           DATABASE_URL: postgresql+asyncpg://gpu:gpu@localhost:5433/gpuindex_test
           REDIS_URL: redis://localhost:6380/0
           API_KEYS: ci-test-key
@@ -77,7 +80,7 @@ jobs:
       - name: build image for scanning
         run: docker build -t scan-target:${{ github.sha }} .
       - name: trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: scan-target:${{ github.sha }}
           severity: HIGH,CRITICAL
@@ -86,7 +89,13 @@ jobs:
 
   deploy:
     needs: [lint, test, security]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Gated on a repo variable because this is a deploy/demo/destroy project:
+    # the stack only exists during a demo window. Set DEPLOY_ENABLED=true in
+    # repo variables once the Terraform stack is up and the OIDC role exists.
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     outputs:
       previous_task_def: ${{ steps.capture.outputs.arn }}
